@@ -312,7 +312,10 @@ async def run_job(job_id, job_data):
 async def process_endpoint(
     request: Request,
     file: Optional[UploadFile] = File(None),
-    url: Optional[str] = Form(None)
+    url: Optional[str] = Form(None),
+    content_type: Optional[str] = Form(None),
+    layout: Optional[str] = Form(None),
+    video_analysis: Optional[bool] = Form(None)
 ):
     api_key = request.headers.get("X-Gemini-Key")
     if not api_key:
@@ -323,9 +326,18 @@ async def process_endpoint(
     if "application/json" in content_type:
         body = await request.json()
         url = body.get("url")
+        content_type = body.get("content_type", content_type)
+        layout = body.get("layout", layout)
+        video_analysis = body.get("video_analysis", video_analysis)
     
     if not url and not file:
         raise HTTPException(status_code=400, detail="Must provide URL or File")
+
+    content_type = content_type or "default"
+    if content_type not in ("default", "gaming"):
+        raise HTTPException(status_code=400, detail="content_type must be 'default' or 'gaming'")
+    if layout and layout not in ("auto", "fill", "zoom", "fit"):
+        raise HTTPException(status_code=400, detail="layout must be one of: auto, fill, zoom, fit")
 
     job_id = str(uuid.uuid4())
     job_output_dir = os.path.join(OUTPUT_DIR, job_id)
@@ -358,6 +370,11 @@ async def process_endpoint(
         cmd.extend(["-i", input_path])
 
     cmd.extend(["-o", job_output_dir])
+    cmd.extend(["--content-type", content_type])
+    if layout:
+        cmd.extend(["--layout", layout])
+    if video_analysis is False:
+        cmd.append("--no-video-analysis")
 
     # Enqueue Job
     jobs[job_id] = {

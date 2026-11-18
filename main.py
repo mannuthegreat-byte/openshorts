@@ -16,6 +16,7 @@ import httpx
 import mediapipe as mp
 # import whisper (replaced by faster_whisper inside function)
 from google import genai
+from google.genai import types
 from dotenv import load_dotenv
 import json
 
@@ -372,6 +373,46 @@ def create_general_frame(frame, output_width, output_height):
     
     return final_frame
 
+def create_gameplay_frame(frame, output_width, output_height, layout):
+    """
+    Fixed layouts for gameplay footage (no face tracking, no jumping around):
+    - 'fill': center crop that fills the whole 9:16 screen (biggest gameplay, loses the sides/HUD).
+    - 'zoom': center square crop shown large over a blurred background (balance of size and context).
+    - 'fit':  full frame fitted to width over a blurred background (shows everything, smallest).
+    """
+    if layout == 'fit':
+        return create_general_frame(frame, output_width, output_height)
+
+    orig_h, orig_w = frame.shape[:2]
+
+    if layout == 'fill':
+        crop_w = min(orig_w, int(round(orig_h * output_width / output_height)))
+        x0 = (orig_w - crop_w) // 2
+        return cv2.resize(frame[:, x0:x0 + crop_w], (output_width, output_height))
+
+    # 'zoom': square-ish center crop (or the full frame if it is already narrow)
+    crop_w = min(orig_w, orig_h)
+    x0 = (orig_w - crop_w) // 2
+    cropped = frame[:, x0:x0 + crop_w]
+
+    # Blurred background from the full frame (cheap: blur at low res, then upscale)
+    small_h = output_height // 4
+    small_w = max(1, int(orig_w * small_h / orig_h))
+    bg_small = cv2.resize(frame, (small_w, small_h))
+    sx = max(0, (small_w - output_width // 4) // 2)
+    bg_small = bg_small[:, sx:sx + output_width // 4]
+    bg_small = cv2.GaussianBlur(bg_small, (21, 21), 0)
+    background = cv2.resize(bg_small, (output_width, output_height))
+
+    fg_h = int(orig_h * output_width / crop_w)
+    if fg_h % 2:
+        fg_h -= 1
+    fg_h = min(fg_h, output_height)
+    foreground = cv2.resize(cropped, (output_width, fg_h))
+    y_offset = (output_height - fg_h) // 2
+    background[y_offset:y_offset + fg_h, :] = foreground
+    return background
+
 def analyze_scenes_strategy(video_path, scenes):
     """
     Analyzes each scene to determine if it should be TRACK (Single person) or GENERAL (Group/Wide).
@@ -477,6 +518,65 @@ def _stream_download(url, output_path, timeout=600):
                     print(f"   → {total/(1024*1024):.1f} MB downloaded", flush=True)
                     last_report = now
     print(f"   → done: {total/(1024*1024):.1f} MB", flush=True)
+
+
+GAMING_PROMPT_TEMPLATE = """
+You are a senior short-form editor for GAMING content (GTA V / GTA Online / GTA RP streams). Pick the 3–15 MOST VIRAL moments of this stream for TikTok/IG Reels/YouTube Shorts. Each clip must be between 15 and 60 seconds long.
+
+{video_note}
+
+WHAT MAKES A GREAT GAMING CLIP (in priority order):
+- Big action payoffs: police chases and escapes, crashes, explosions, shootouts, insane stunts or jumps, close calls, clutch wins.
+- Funny moments: glitches, ragdoll physics, fails, absurd NPC behaviour, chaotic RP interactions, trolling.
+- Strong streamer reactions: screaming, laughing, rage, disbelief, hype ("BRO WHAT?!"), funny one-liners.
+- A clear mini-story: setup → escalation → payoff. Start right before the action kicks off, end right after the payoff/reaction.
+- Moments without talking are FINE if the gameplay itself is exciting.
+
+AVOID: loading screens, menus, pause screens, driving around with nothing happening, long silent stretches with no action, waiting in lobbies, stream intros/outros, "be right back" screens.
+
+⚠️ FFMPEG TIME CONTRACT — STRICT REQUIREMENTS:
+- Return timestamps in ABSOLUTE SECONDS from the start of the video (usable in: ffmpeg -ss <start> -to <end> -i <input> ...).
+- Only NUMBERS with decimal point, up to 3 decimals (examples: 0, 1.250, 17.350).
+- Ensure 0 ≤ start < end ≤ VIDEO_DURATION_SECONDS.
+- Each clip between 15 and 60 s (inclusive).
+- Never cut in the middle of a spoken word or phrase.
+- STRICTLY FORBIDDEN to use time formats other than absolute seconds.
+
+VIDEO_DURATION_SECONDS: {video_duration}
+
+STREAMER SPEECH TRANSCRIPT (may be sparse or contain noise from game audio):
+{transcript_text}
+
+WORDS_JSON (array of {{w, s, e}} where s/e are seconds):
+{words_json}
+
+OUTPUT — RETURN ONLY VALID JSON (no markdown, no comments). Order clips by predicted performance (best to worst). Descriptions should sound like a gaming creator: short, hype, with relevant hashtags (e.g. #gta5 #gtaonline #gtarp #gaming) and a simple CTA like "Follow for more GTA chaos". Write titles, descriptions and hook text in the same language the streamer speaks (English if there is no speech):
+{{
+  "shorts": [
+    {{
+      "start": <number in seconds, e.g., 12.340>,
+      "end": <number in seconds, e.g., 37.900>,
+      "video_description_for_tiktok": "<description for TikTok oriented to get views>",
+      "video_description_for_instagram": "<description for Instagram oriented to get views>",
+      "video_title_for_youtube_short": "<title for YouTube Short oriented to get views 100 chars max>",
+      "viral_hook_text": "<SHORT punchy text overlay (max 10 words). Examples: 'He did NOT see that coming', 'Worst getaway driver ever', 'Cops vs me: round 47'>"
+    }}
+  ]
+}}
+"""
+
+VIDEO_NOTE_WITH_VIDEO = (
+    "You are given the ACTUAL VIDEO of the stream plus the streamer's speech transcript. "
+    "WATCH the gameplay: use what happens on screen as the main signal, and use the transcript/reactions to "
+    "confirm and time the best moments. Timestamps you return must match the video timeline."
+)
+VIDEO_NOTE_TRANSCRIPT_ONLY = (
+    "You only have the streamer's speech transcript (no video). Use reactions and what the streamer says "
+    "to infer where the action happens."
+)
+
+# Valid layouts for process_video_to_vertical
+LAYOUTS = ("auto", "fill", "zoom", "fit")
 
 
 _YOUTUBE_MP41_HOST = "youtube-mp41.p.rapidapi.com"
@@ -585,9 +685,10 @@ def _download_youtube_video_impl(url, output_dir="."):
     )
     return final_output, sanitized_title
 
-def process_video_to_vertical(input_video, final_output_video):
+def process_video_to_vertical(input_video, final_output_video, layout='auto'):
     """
     Core logic to convert horizontal video to vertical using scene detection and Active Speaker Tracking (MediaPipe).
+    layout='auto' uses face tracking; 'fill' / 'zoom' / 'fit' use a fixed gameplay layout (see create_gameplay_frame).
     """
     script_start_time = time.time()
     
@@ -602,6 +703,10 @@ def process_video_to_vertical(input_video, final_output_video):
     if os.path.exists(final_output_video): os.remove(final_output_video)
 
     print(f"🎬 Processing clip: {input_video}")
+    if layout in ('fill', 'zoom', 'fit'):
+        return _process_fixed_layout(input_video, final_output_video, layout,
+                                     temp_video_output, temp_audio_output)
+
     print("   Step 1: Detecting scenes...")
     scenes, fps = detect_scenes(input_video)
     
@@ -757,14 +862,82 @@ def process_video_to_vertical(input_video, final_output_video):
     
     return True
 
-def transcribe_video(video_path):
+def _render_frames(input_video, temp_video_output, output_width, output_height, fps, frame_fn):
+    """Reads frames from input_video, maps each via frame_fn, and encodes them to temp_video_output."""
+    command = [
+        'ffmpeg', '-y', '-f', 'rawvideo', '-vcodec', 'rawvideo',
+        '-s', f'{output_width}x{output_height}', '-pix_fmt', 'bgr24',
+        '-r', str(fps), '-i', '-', '-c:v', 'libx264',
+        '-preset', 'fast', '-crf', '23', '-pix_fmt', 'yuv420p', '-an', temp_video_output
+    ]
+    ffmpeg_process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    cap = cv2.VideoCapture(input_video)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    with tqdm(total=total_frames, desc="   Processing", file=sys.stdout) as pbar:
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+            ffmpeg_process.stdin.write(frame_fn(frame).tobytes())
+            pbar.update(1)
+    ffmpeg_process.stdin.close()
+    stderr_output = ffmpeg_process.stderr.read().decode()
+    ffmpeg_process.wait()
+    cap.release()
+    if ffmpeg_process.returncode != 0:
+        print("\n   ❌ FFmpeg frame processing failed.")
+        print("   Stderr:", stderr_output)
+        return False
+    return True
+
+
+def _process_fixed_layout(input_video, final_output_video, layout, temp_video_output, temp_audio_output):
+    """Gameplay mode: same fixed layout on every frame (no scene/face analysis)."""
+    print(f"   🎮 Gameplay layout: {layout.upper()} (face tracking disabled)")
+    cap = cv2.VideoCapture(input_video)
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30
+    cap.release()
+
+    output_height = 1920
+    output_width = int(output_height * ASPECT_RATIO)
+    if output_width % 2 != 0:
+        output_width += 1
+
+    ok = _render_frames(
+        input_video, temp_video_output, output_width, output_height, fps,
+        lambda f: create_gameplay_frame(f, output_width, output_height, layout),
+    )
+    if not ok:
+        return False
+
+    # Copy the original audio back on top of the rendered video
+    merge_command = [
+        'ffmpeg', '-y', '-i', temp_video_output, '-i', input_video,
+        '-map', '0:v:0', '-map', '1:a:0?', '-c:v', 'copy', '-c:a', 'copy',
+        final_output_video
+    ]
+    try:
+        subprocess.run(merge_command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        print(f"   ✅ Clip saved to {final_output_video}")
+    except subprocess.CalledProcessError as e:
+        print("\n   ❌ Final merge failed.")
+        print("   Stderr:", e.stderr.decode())
+        return False
+    finally:
+        if os.path.exists(temp_video_output): os.remove(temp_video_output)
+        if os.path.exists(temp_audio_output): os.remove(temp_audio_output)
+    return True
+
+
+def transcribe_video(video_path, vad_filter=False):
     print("🎙️  Transcribing video with Faster-Whisper (CPU Optimized)...")
     from faster_whisper import WhisperModel
     
     # Run on CPU with INT8 quantization for speed
     model = WhisperModel("base", device="cpu", compute_type="int8")
     
-    segments, info = model.transcribe(video_path, word_timestamps=True)
+    # vad_filter skips non-speech parts (game music, gunfire...) which reduces Whisper hallucinations
+    segments, info = model.transcribe(video_path, word_timestamps=True, vad_filter=vad_filter)
     
     print(f"   Detected language '{info.language}' with probability {info.language_probability:.2f}")
     
@@ -801,7 +974,48 @@ def transcribe_video(video_path):
         'language': info.language
     }
 
-def get_viral_clips(transcript_result, video_duration):
+def make_analysis_proxy(input_video, output_dir):
+    """
+    Creates a small, low-res, 1 fps copy of the video for Gemini to watch.
+    Gemini samples video at ~1 fps anyway, so this keeps uploads fast even for multi-hour streams.
+    """
+    proxy_path = os.path.join(output_dir, "_gemini_proxy.mp4")
+    print("🎞️  Creating low-res proxy for Gemini video analysis...", flush=True)
+    cmd = [
+        'ffmpeg', '-y', '-i', input_video,
+        '-vf', 'fps=1,scale=-2:360',
+        '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '32',
+        '-c:a', 'aac', '-b:a', '48k', '-ac', '1',
+        proxy_path
+    ]
+    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    print(f"   → proxy: {os.path.getsize(proxy_path)/(1024*1024):.1f} MB", flush=True)
+    return proxy_path
+
+
+def upload_video_to_gemini(client, video_path):
+    """Uploads a video to the Gemini File API and waits until it is ready."""
+    print("📤 Uploading video to Gemini...", flush=True)
+    uploaded = client.files.upload(file=video_path)
+    deadline = time.time() + 1800
+    while True:
+        info = client.files.get(name=uploaded.name)
+        state = str(getattr(info.state, "name", info.state))
+        if state == "ACTIVE":
+            print("✅ Gemini finished processing the video.", flush=True)
+            return info
+        if state == "FAILED":
+            raise RuntimeError("Gemini failed to process the uploaded video.")
+        if time.time() > deadline:
+            raise TimeoutError("Timed out waiting for Gemini to process the video.")
+        time.sleep(5)
+
+
+def get_viral_clips(transcript_result, video_duration, content_type="default", video_path=None):
+    """
+    content_type: 'default' (talking/tech videos) or 'gaming'.
+    video_path: if given, Gemini also WATCHES the video (needed to find action moments without talking).
+    """
     print("🤖  Analyzing with Gemini...")
     
     api_key = os.getenv("GEMINI_API_KEY")
@@ -826,11 +1040,37 @@ def get_viral_clips(transcript_result, video_duration):
                 'e': word['end']
             })
 
-    prompt = GEMINI_PROMPT_TEMPLATE.format(
-        video_duration=video_duration,
-        transcript_text=json.dumps(transcript_result['text']),
-        words_json=json.dumps(words)
-    )
+    uploaded_video = None
+    if video_path:
+        try:
+            uploaded_video = upload_video_to_gemini(client, video_path)
+        except Exception as e:
+            print(f"⚠️  Video upload to Gemini failed ({e}). Falling back to transcript-only analysis.")
+            uploaded_video = None
+
+    if content_type == "gaming":
+        prompt = GAMING_PROMPT_TEMPLATE.format(
+            video_note=VIDEO_NOTE_WITH_VIDEO if uploaded_video else VIDEO_NOTE_TRANSCRIPT_ONLY,
+            video_duration=video_duration,
+            transcript_text=json.dumps(transcript_result['text']),
+            words_json=json.dumps(words)
+        )
+    else:
+        prompt = GEMINI_PROMPT_TEMPLATE.format(
+            video_duration=video_duration,
+            transcript_text=json.dumps(transcript_result['text']),
+            words_json=json.dumps(words)
+        )
+
+    if uploaded_video:
+        contents = [uploaded_video, prompt]
+        # Low media resolution (~100 tokens/sec) lets multi-hour streams fit in the context window
+        gen_config = types.GenerateContentConfig(
+            media_resolution=types.MediaResolution.MEDIA_RESOLUTION_LOW
+        )
+    else:
+        contents = prompt
+        gen_config = None
 
     max_attempts = 6
     transient_markers = (
@@ -842,7 +1082,8 @@ def get_viral_clips(transcript_result, video_duration):
         try:
             response = client.models.generate_content(
                 model=model_name,
-                contents=prompt,
+                contents=contents,
+                config=gen_config,
             )
             break
         except Exception as e:
@@ -857,6 +1098,15 @@ def get_viral_clips(transcript_result, video_duration):
                 f"(attempt {attempt + 1}/{max_attempts})"
             )
             time.sleep(delay)
+
+    if uploaded_video is not None:
+        try:
+            client.files.delete(name=uploaded_video.name)
+        except Exception:
+            pass
+
+    if response is None:
+        return None
 
     try:
         # --- Cost Calculation ---
@@ -920,10 +1170,18 @@ if __name__ == '__main__':
     parser.add_argument('-o', '--output', type=str, help="Output directory or file (if processing whole video).")
     parser.add_argument('--keep-original', action='store_true', help="Keep the downloaded YouTube video.")
     parser.add_argument('--skip-analysis', action='store_true', help="Skip AI analysis and convert the whole video.")
+    parser.add_argument('--content-type', choices=['default', 'gaming'], default='default',
+                        help="'gaming' uses a gameplay-focused prompt and lets Gemini watch the video.")
+    parser.add_argument('--layout', choices=list(LAYOUTS), default=None,
+                        help="Vertical layout: auto (face tracking), fill, zoom, fit. Default: auto, or zoom for gaming.")
+    parser.add_argument('--no-video-analysis', action='store_true',
+                        help="Gaming mode only: don't send the video to Gemini (transcript only, cheaper).")
     
     args = parser.parse_args()
 
     script_start_time = time.time()
+    layout = args.layout or ('zoom' if args.content_type == 'gaming' else 'auto')
+    print(f"⚙️  Content type: {args.content_type} | Layout: {layout}")
     
     def _ensure_dir(path: str) -> str:
         """Create directory if missing and return the same path."""
@@ -971,10 +1229,11 @@ if __name__ == '__main__':
     if args.skip_analysis:
         print("⏩ Skipping analysis, processing entire video...")
         output_file = args.output if args.output else os.path.join(output_dir, f"{video_title}_vertical.mp4")
-        process_video_to_vertical(input_video, output_file)
+        process_video_to_vertical(input_video, output_file, layout=layout)
     else:
         # 3. Transcribe
-        transcript = transcribe_video(input_video)
+        is_gaming = args.content_type == 'gaming'
+        transcript = transcribe_video(input_video, vad_filter=is_gaming)
         
         # Get duration
         cap = cv2.VideoCapture(input_video)
@@ -984,7 +1243,16 @@ if __name__ == '__main__':
         cap.release()
 
         # 4. Gemini Analysis
-        clips_data = get_viral_clips(transcript, duration)
+        proxy_path = None
+        if is_gaming and not args.no_video_analysis:
+            try:
+                proxy_path = make_analysis_proxy(input_video, output_dir)
+            except Exception as e:
+                print(f"⚠️  Could not create video proxy ({e}). Using transcript only.")
+                proxy_path = None
+        clips_data = get_viral_clips(transcript, duration, content_type=args.content_type, video_path=proxy_path)
+        if proxy_path and os.path.exists(proxy_path):
+            os.remove(proxy_path)
         
         if not clips_data or 'shorts' not in clips_data:
             print("❌ Failed to identify viral clips from Gemini after retries. Re-submit the job to retry.")
@@ -1025,7 +1293,7 @@ if __name__ == '__main__':
                 subprocess.run(cut_command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
                 
                 # Process vertical
-                success = process_video_to_vertical(clip_temp_path, clip_final_path)
+                success = process_video_to_vertical(clip_temp_path, clip_final_path, layout=layout)
                 
                 if success:
                     print(f"   ✅ Clip {i+1} ready: {clip_final_path}")

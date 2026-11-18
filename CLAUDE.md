@@ -62,6 +62,9 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 - **TRACK Mode** (single subject): MediaPipe face detection + YOLOv8 fallback with "Heavy Tripod" stabilization
 - **GENERAL Mode** (groups/landscapes): Blurred background layout preserving full width
 
+### Gaming Mode
+`main.py --content-type gaming` (dashboard: "Gaming Stream" toggle) switches to a gameplay-focused Gemini prompt, uploads a 360p/1fps proxy so Gemini watches the video (disable with `--no-video-analysis`), enables Whisper VAD, and uses a fixed layout instead of face tracking. `--layout` = `auto` (face tracking, default), `fill` (center crop), `zoom` (square crop over blur, gaming default), `fit` (full frame over blur). `/api/process` accepts `content_type`, `layout`, `video_analysis`.
+
 ### Key Classes
 - `SmoothedCameraman` - Stabilized camera movement with safe zone logic (prevents jitter)
 - `SpeakerTracker` - Prevents rapid speaker switching, handles temporary occlusions
