@@ -490,7 +490,7 @@ def sanitize_filename(filename):
     return filename[:100]
 
 
-_YT_ID_RE = re.compile(r"(?:v=|/shorts/|/embed/|youtu\.be/)([0-9A-Za-z_-]{11})")
+_YT_ID_RE = re.compile(r"(?:v=|/shorts/|/embed/|/live/|youtu\.be/)([0-9A-Za-z_-]{11})")
 
 
 def _extract_youtube_id(url):
