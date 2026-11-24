@@ -519,6 +519,87 @@ async def edit_clip(
         print(f"❌ Edit Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+class AnimeRequest(BaseModel):
+    job_id: str
+    clip_index: int
+    style: Optional[str] = "auto"  # auto | shonen | ghibli | cyberpunk | manga
+    input_filename: Optional[str] = None
+
+@app.post("/api/anime")
+async def anime_clip(
+    req: AnimeRequest,
+    x_anthropic_key: Optional[str] = Header(None, alias="X-Anthropic-Key")
+):
+    """Restyle a clip as anime. Claude directs the look; FFmpeg renders it."""
+    from anime import animefy_clip, STYLE_PRESETS
+
+    final_api_key = x_anthropic_key or os.environ.get("ANTHROPIC_API_KEY")
+    if not final_api_key:
+        raise HTTPException(status_code=400, detail="Missing Anthropic API Key (set it in Settings)")
+    if req.style and req.style != "auto" and req.style not in STYLE_PRESETS:
+        raise HTTPException(status_code=400, detail=f"Unknown style: {req.style}")
+
+    if req.job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job = jobs[req.job_id]
+    if 'result' not in job or 'clips' not in job['result']:
+        raise HTTPException(status_code=400, detail="Job result not available")
+    if req.clip_index < 0 or req.clip_index >= len(job['result']['clips']):
+        raise HTTPException(status_code=404, detail="Clip not found")
+
+    if req.input_filename:
+        filename = os.path.basename(req.input_filename)
+    else:
+        filename = job['result']['clips'][req.clip_index]['video_url'].split('/')[-1]
+    input_path = os.path.join(OUTPUT_DIR, req.job_id, filename)
+    if not os.path.exists(input_path):
+        raise HTTPException(status_code=404, detail=f"Video file not found: {filename}")
+
+    anime_filename = f"anime_{uuid.uuid4().hex[:6]}_{filename}"
+    output_path = os.path.join(OUTPUT_DIR, req.job_id, anime_filename)
+
+    def run_anime():
+        # Clip window in the source video, so Claude gets the right transcript lines
+        transcript, clip_start, clip_end = None, 0.0, None
+        try:
+            meta_files = glob.glob(os.path.join(OUTPUT_DIR, req.job_id, "*_metadata.json"))
+            if meta_files:
+                with open(meta_files[0], 'r') as f:
+                    data = json.load(f)
+                transcript = data.get('transcript')
+                shorts = data.get('shorts', [])
+                if req.clip_index < len(shorts):
+                    clip_start = float(shorts[req.clip_index].get('start', 0))
+                    clip_end = float(shorts[req.clip_index].get('end', 0)) or None
+        except Exception as e:
+            print(f"⚠️ Could not load transcript for anime context: {e}")
+
+        # ASCII-safe temp paths (same Docker locale workaround as /api/edit)
+        safe_in = os.path.join(OUTPUT_DIR, req.job_id, f"temp_anime_in_{uuid.uuid4().hex[:6]}.mp4")
+        safe_out = safe_in.replace("temp_anime_in_", "temp_anime_out_")
+        shutil.copy(input_path, safe_in)
+        try:
+            plan = animefy_clip(final_api_key, safe_in, safe_out, transcript=transcript,
+                                clip_start=clip_start, clip_end=clip_end, style_hint=req.style)
+            shutil.move(safe_out, output_path)
+            return plan
+        finally:
+            for p in (safe_in, safe_out):
+                if os.path.exists(p):
+                    os.remove(p)
+
+    try:
+        loop = asyncio.get_event_loop()
+        plan = await loop.run_in_executor(None, run_anime)
+        return {
+            "success": True,
+            "new_video_url": f"/videos/{req.job_id}/{anime_filename}",
+            "anime_plan": plan,
+        }
+    except Exception as e:
+        print(f"❌ Anime Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 class SubtitleRequest(BaseModel):
     job_id: str
     clip_index: int

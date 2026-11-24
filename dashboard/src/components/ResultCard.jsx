@@ -1,12 +1,12 @@
 import React, { useState, useEffect } from 'react';
-import { Download, Share2, Instagram, Youtube, Video, CheckCircle, AlertCircle, X, Loader2, Copy, Wand2, Type, Calendar, Clock, Languages } from 'lucide-react';
+import { Download, Share2, Instagram, Youtube, Video, CheckCircle, AlertCircle, X, Loader2, Copy, Wand2, Type, Calendar, Clock, Languages, Sparkles } from 'lucide-react';
 import { getApiUrl } from '../config';
 import SubtitleModal from './SubtitleModal';
 import HookModal from './HookModal';
 import TranslateModal from './TranslateModal';
 import { renderInBrowser } from '../lib/renderInBrowser';
 
-export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUserId, geminiApiKey, elevenLabsKey, onPlay, onPause }) {
+export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUserId, geminiApiKey, elevenLabsKey, anthropicKey, onPlay, onPause }) {
     const [showModal, setShowModal] = useState(false);
     const [showSubtitleModal, setShowSubtitleModal] = useState(false);
     const videoRef = React.useRef(null);
@@ -33,6 +33,9 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
     const [showHookModal, setShowHookModal] = useState(false);
     const [showTranslateModal, setShowTranslateModal] = useState(false);
     const [editError, setEditError] = useState(null);
+    const [isAnimating, setIsAnimating] = useState(false);
+    const [animeStyle, setAnimeStyle] = useState('auto');
+    const [animePlan, setAnimePlan] = useState(null);
 
     const [clipDuration, setClipDuration] = useState(clip.end && clip.start ? clip.end - clip.start : 30);
 
@@ -131,6 +134,48 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
             setTimeout(() => setEditError(null), 5000);
         } finally {
             setIsEditing(false);
+        }
+    };
+
+    const handleAnime = async () => {
+        setIsAnimating(true);
+        setEditError(null);
+        try {
+            if (!anthropicKey) {
+                throw new Error("Anthropic API Key is missing. Please set it in Settings.");
+            }
+            const res = await fetch(getApiUrl('/api/anime'), {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Anthropic-Key': anthropicKey
+                },
+                body: JSON.stringify({
+                    job_id: jobId,
+                    clip_index: index,
+                    style: animeStyle,
+                    input_filename: currentVideoUrl.split('/').pop()
+                })
+            });
+            if (!res.ok) {
+                const errText = await res.text();
+                let detail = errText;
+                try { detail = JSON.parse(errText).detail || errText; } catch (_) { /* plain text */ }
+                throw new Error(detail);
+            }
+            const data = await res.json();
+            if (data.new_video_url) {
+                setCurrentVideoUrl(getApiUrl(data.new_video_url));
+                setAnimePlan(data.anime_plan || null);
+                if (videoRef.current) {
+                    videoRef.current.load();
+                }
+            }
+        } catch (e) {
+            setEditError(e.message);
+            setTimeout(() => setEditError(null), 5000);
+        } finally {
+            setIsAnimating(false);
         }
     };
 
@@ -402,6 +447,14 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                 </div>
 
                 {/* Auto Edit Overlay if Processing */}
+                {isAnimating && (
+                    <div className="absolute inset-0 bg-black/60 backdrop-blur-sm flex flex-col items-center justify-center z-10 p-4 text-center">
+                        <Loader2 size={32} className="text-pink-400 animate-spin mb-3" />
+                        <span className="text-xs font-bold text-white uppercase tracking-wider">Drawing your anime...</span>
+                        <span className="text-[10px] text-zinc-400 mt-1">Claude is directing the look</span>
+                    </div>
+                )}
+
                 {isEditing && (
                     <div className="absolute inset-0 bg-black/60 backdrop-blur-sm flex flex-col items-center justify-center z-10 p-4 text-center">
                         <Loader2 size={32} className="text-primary animate-spin mb-3" />
@@ -450,6 +503,13 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                     </div>
                 </div>
 
+                {animePlan && (
+                    <div className="mb-3 p-2 bg-pink-500/10 border border-pink-500/20 text-pink-300 text-[10px] rounded-lg">
+                        <span className="font-bold uppercase">{animePlan.style}</span>
+                        {animePlan.title_card ? ` · "${animePlan.title_card}"` : ''} · {animePlan.reasoning}
+                    </div>
+                )}
+
                 {/* Error Message */}
                 {editError && (
                     <div className="mb-3 p-2 bg-red-500/10 border border-red-500/20 text-red-400 text-[10px] rounded-lg flex items-center gap-2">
@@ -495,6 +555,30 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                         {isTranslating ? <Loader2 size={14} className="animate-spin" /> : <Languages size={14} />}
                         {isTranslating ? 'Translating...' : 'Dub Voice'}
                     </button>
+
+                    <div className="col-span-2 flex gap-2 mb-1">
+                        <select
+                            value={animeStyle}
+                            onChange={(e) => setAnimeStyle(e.target.value)}
+                            disabled={isAnimating}
+                            className="bg-black/40 border border-white/10 text-zinc-300 rounded-lg text-xs px-2"
+                            title="Anime look"
+                        >
+                            <option value="auto">Auto (Claude picks)</option>
+                            <option value="shonen">Shonen</option>
+                            <option value="ghibli">Soft / Ghibli-like</option>
+                            <option value="cyberpunk">Cyberpunk</option>
+                            <option value="manga">Manga B&amp;W</option>
+                        </select>
+                        <button
+                            onClick={handleAnime}
+                            disabled={isAnimating}
+                            className="flex-1 py-2 bg-gradient-to-r from-pink-500 to-rose-600 hover:from-pink-400 hover:to-rose-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-pink-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 truncate px-1"
+                        >
+                            {isAnimating ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
+                            {isAnimating ? 'Drawing...' : 'Anime Style'}
+                        </button>
+                    </div>
 
                     <button
                         onClick={() => setShowModal(true)}

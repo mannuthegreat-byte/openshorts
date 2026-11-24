@@ -55,6 +55,7 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 | `s3_uploader.py` | AWS S3 upload with caching |
 | `subtitles.py` | SRT generation, FFmpeg subtitle burning, and dubbed video transcription |
 | `translate.py` | ElevenLabs dubbing API for AI voice translation |
+| `anime.py` | Claude-directed anime restyle (cel shading, ink lines, manga SFX, title card) |
 | `dashboard/src/App.jsx` | Main React component with state management |
 | `dashboard/src/components/TranslateModal.jsx` | Voice dubbing UI with language selection |
 
@@ -75,6 +76,7 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 | POST | `/api/subtitle` | Generate and apply subtitles (auto-transcribes dubbed videos) |
 | POST | `/api/hook` | Add text hook overlays |
 | POST | `/api/translate` | AI voice dubbing via ElevenLabs |
+| POST | `/api/anime` | Anime-style restyle; Claude picks look + impact moments, FFmpeg renders |
 | GET | `/api/translate/languages` | List supported dubbing languages |
 | POST | `/api/social/post` | Post to social media (async upload) |
 
@@ -91,6 +93,7 @@ Async job queue with semaphore-based concurrency control. Configure via `MAX_CON
 **Client-side (localStorage, encrypted):**
 - `GEMINI_API_KEY` - Google Gemini API key (required)
 - `ELEVENLABS_API_KEY` - ElevenLabs API key for voice dubbing (optional)
+- `ANTHROPIC_API_KEY` - Claude API key for Anime Style (optional; sent as `X-Anthropic-Key`)
 - `UPLOAD_POST_API_KEY` - Upload-Post API key for social posting (optional)
 
 > API keys are stored encrypted in the browser and sent via headers only when needed. Never stored server-side.

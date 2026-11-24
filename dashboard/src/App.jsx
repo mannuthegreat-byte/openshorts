@@ -155,6 +155,13 @@ function App() {
     return '';
   });
 
+  // Anthropic (Claude) API State - Load encrypted
+  const [anthropicKey, setAnthropicKey] = useState(() => {
+    const stored = localStorage.getItem('anthropicKey_v1');
+    if (stored) return decrypt(stored);
+    return '';
+  });
+
   const [uploadUserId, setUploadUserId] = useState(() => localStorage.getItem('uploadUserId') || '');
   const [userProfiles, setUserProfiles] = useState([]); // List of {username, connected: []}
   const [showKeyModal, setShowKeyModal] = useState(false);
@@ -250,6 +257,12 @@ function App() {
       localStorage.setItem('elevenLabsKey_v1', encrypt(elevenLabsKey));
     }
   }, [elevenLabsKey]);
+
+  useEffect(() => {
+    if (anthropicKey) {
+      localStorage.setItem('anthropicKey_v1', encrypt(anthropicKey));
+    }
+  }, [anthropicKey]);
 
   useEffect(() => {
     if (falKey) {
@@ -631,6 +644,47 @@ function App() {
 
               <div className="glass-panel p-6 mt-8">
                 <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-lg font-semibold">Anime Style (Claude)</h2>
+                  <span className="text-[10px] bg-pink-500/10 border border-pink-500/20 px-2 py-0.5 rounded text-pink-400 uppercase tracking-wider">New</span>
+                </div>
+                <p className="text-xs text-zinc-500 mb-6 leading-relaxed">
+                  Turn clips into anime-styled shorts. <strong>Claude</strong> watches the clip, picks a look
+                  (Shonen, Ghibli-like, Cyberpunk or Manga), and adds manga sound effects and an episode title card at key moments.
+                </p>
+                <div className="space-y-4">
+                  <label className="block text-sm text-zinc-400">Anthropic API Key</label>
+                  <div className="flex gap-2">
+                    <input
+                      type="password"
+                      value={anthropicKey}
+                      onChange={(e) => setAnthropicKey(e.target.value)}
+                      className="input-field"
+                      placeholder="sk-ant-..."
+                    />
+                    <button
+                      onClick={() => {
+                        if (anthropicKey) {
+                          localStorage.setItem('anthropicKey_v1', encrypt(anthropicKey));
+                          alert('Anthropic API Key saved!');
+                        }
+                      }}
+                      className="btn-primary py-2 px-4 text-sm"
+                    >
+                      Save
+                    </button>
+                  </div>
+                  <p className="text-xs text-zinc-500 leading-relaxed">
+                    Get a key from <a href="https://platform.claude.com/settings/keys" target="_blank" rel="noopener noreferrer" className="underline">the Claude Console</a>.
+                    <br />
+                    <span className="text-zinc-600 italic">
+                      Keys are only stored in your browser. Sent to backend only to process requests.
+                    </span>
+                  </p>
+                </div>
+              </div>
+
+              <div className="glass-panel p-6 mt-8">
+                <div className="flex items-center justify-between mb-4">
                   <h2 className="text-lg font-semibold">AI Shorts (UGC Videos)</h2>
                   <span className="text-[10px] bg-violet-500/10 border border-violet-500/20 px-2 py-0.5 rounded text-violet-400 uppercase tracking-wider">New</span>
                 </div>
@@ -821,6 +875,7 @@ function App() {
                           uploadUserId={uploadUserId}
                           geminiApiKey={apiKey}
                           elevenLabsKey={elevenLabsKey}
+                          anthropicKey={anthropicKey}
                           onPlay={(time) => handleClipPlay(time)}
                           onPause={handleClipPause}
                         />
